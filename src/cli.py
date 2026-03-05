@@ -32,7 +32,7 @@ def main():
 
     print(f"\nModel: {args.model}")
     print(args.prompt)
-    recycler.generate(args.prompt)
+    recycler.generate(args.prompt, max_new_tokens=2048)
 
     if args.show_matrix:
         recycler.print_matrix_sample()

@@ -64,8 +64,21 @@ class TokenRecycling:
         """
         Generate text using token recycling method.
         """
-        input_ids = prompt.to(device=self.device) if isinstance(prompt, torch.Tensor) else \
-             cast(torch.Tensor, self.tokenizer(prompt, return_tensors="pt").to(self.device).input_ids)
+        if isinstance(prompt, str):
+            messages = [
+                {"role": "user", "content": prompt}
+            ]
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True
+            )
+            print(f"[DEBUG] Tokenized prompt: {prompt}") # Print the tokenized prompt for debugging.
+            print("[DEBUG] End of prompt")
+            input_ids = self.tokenizer(prompt, return_tensors="pt").to(self.device).input_ids
+        else:
+            input_ids = prompt.to(device=self.device)
         prompt_length = input_ids.shape[-1]
         guess_length = 0 # Number of trailing tokens in input_ids that are guesses.
         total_accepted_tokens = 0
@@ -89,6 +102,7 @@ class TokenRecycling:
             steps += 1
             position_ids = self.get_position_ids(input_ids, guess_length)
             attention_mask = self.get_attention_mask(input_ids, guess_length)
+            # self._log_step(steps, input_ids, guess_length)
             use_full_input_ids = not self.use_cache or input_ids.shape[-1] == prompt_length
             logits = self.model(
                 input_ids if use_full_input_ids else input_ids[..., -(guess_length+1):],
@@ -102,6 +116,7 @@ class TokenRecycling:
                 total_guesses += 1
             if generation_start_time is None:
                 generation_start_time = time.time()
+            # print(f"[DEBUG] step {steps}, total_guesses {total_guesses}, logits shape {logits.shape}, input_ids shape {input_ids.shape}, guess_length {guess_length}")
 
             next_token_index = -1 - guess_length
             if not hot_start:
@@ -116,7 +131,8 @@ class TokenRecycling:
             next_token = logits[:, next_token_index, :].argmax(dim=-1)
 
             if not silent:
-                print(next_token.item() if self.show_tokens else self.tokenizer.decode(next_token), end=" " if self.show_tokens else "")
+                if next_token.item() != self.tokenizer.eos_token_id:
+                    print(next_token.item() if self.show_tokens else self.tokenizer.decode(next_token), end=" " if self.show_tokens else "")
                 sys.stdout.flush()
 
             if self.should_speculate:
@@ -127,17 +143,28 @@ class TokenRecycling:
                 input_ids = torch.cat([input_ids[... , :input_length], next_token.unsqueeze(0)], dim=-1)
                 accepted_seqs.append([0])
 
+                # =====[=,confirmed][-----,guess], guess_length = 5, input_length = 6
+                # next_token is based on hidden states of [=,confirmed]
+                # guesses: =-----
+                # input_ids: =====[=,confirmed][=,next_token]
+
                 # Get correct guesses, if any.
                 if guess_length > 0:
                     # Look back 1 to include the newly-predicted token. All guesses are predicated on it.
                     guess_logits = logits[..., input_length-1:, :] if use_full_input_ids else logits
                     guess_max = guess_logits.argmax(dim=-1)
+                    # guess_logits: [=,confirmed][-----,guess]
+                    #                     |
+                    #                     v
+                    # guess_max should be their own next tokens
+                    #              [=,next_token][=====,new]
                     assert guess_max[0, 0] == next_token, f"Expected {next_token} as first part of guess but got {guess_max[0, 0]}"
                     longest_sequence = self.get_longest_sequence(self.tree_template, guesses, guess_max)
 
                     if len(longest_sequence) > 0:
                         assert guesses[0, longest_sequence[1]] == next_token, f"Expected {next_token.item()} as first part of sequence but got {guesses[0, longest_sequence[0]]}"
                         verified_ids = guess_max[..., longest_sequence[..., 1:]]
+                        # the last one is not included in guess! either corrected wrong guess or just predicted by a leaf
 
                         if not silent:
                             colors = ["95", "94", "92", "93", "91"]
@@ -153,11 +180,15 @@ class TokenRecycling:
                         self.update_cache(past_key_values, guess_length, longest_sequence)
                         accepted_seqs[-1].extend(longest_sequence[1:].tolist())
                     elif past_key_values:
+                        # no guess is correct (excluding the first, which is confirmed by nature due to greedy decoding)
+                        # only the root. just keep input_length kv caches
                         past_key_values.crop(input_length)
 
                 # Generate new guesses.
                 new_guesses, cached_tree_layers = self.merge_sequence(
                     self.adjacency_matrix, self.tree_template, input_ids[..., -1], cached_tree_layers)
+                # print(f"[DEBUG] input_ids: {input_ids}") # Print the new guesses for debugging.
+                # print(f"[DEBUG] new_guesses: {new_guesses}") # Print the new guesses for debugging.
                 new_guesses = new_guesses[1:] # Exclude the latest known token.
                 input_ids = torch.cat([input_ids, new_guesses.unsqueeze(0)], dim=-1)
                 guess_length = new_guesses.shape[-1]
@@ -166,7 +197,8 @@ class TokenRecycling:
 
             if stop_on_eos and torch.where(
                 input_ids[..., prompt_length:input_ids.shape[-1]-guess_length] == self.tokenizer.eos_token_id)[-1].any():
-                    break
+                # print(f"[DEBUG] quit due to eos={self.tokenizer.eos_token_id} in {input_ids}") # Print the final output including guesses for debugging.
+                break
 
         if not silent:
             print("\n")
@@ -186,13 +218,14 @@ class TokenRecycling:
         trim_length = max(input_ids.shape[-1] - prompt_length - max_new_tokens, input_ids.shape[-1] - eos_index)
         if trim_length > 0:
             input_ids = input_ids[..., :-trim_length]
-            while len(accepted_seqs) > 0 and trim_length > 0:
-                if len(accepted_seqs[-1]) <= trim_length:
-                    trim_length -= len(accepted_seqs.pop())
-                else:
-                    accepted_seqs[-1] = accepted_seqs[-1][:-trim_length]
-                    trim_length = 0
-            assert sum([len(s) for s in accepted_seqs]) == input_ids.shape[-1] - prompt_length
+            if self.should_speculate:
+                while len(accepted_seqs) > 0 and trim_length > 0:
+                    if len(accepted_seqs[-1]) <= trim_length:
+                        trim_length -= len(accepted_seqs.pop())
+                    else:
+                        accepted_seqs[-1] = accepted_seqs[-1][:-trim_length]
+                        trim_length = 0
+                assert sum([len(s) for s in accepted_seqs]) == input_ids.shape[-1] - prompt_length
             assert input_ids.shape[-1] <= prompt_length + max_new_tokens
 
         return Outputs(output_ids=input_ids, accepted_sequences=accepted_seqs, total_steps=steps)
@@ -327,15 +360,17 @@ class TokenRecycling:
         if not cache:
             return
 
-        length = cache.key_cache[0].shape[-2]
         input_length = cache.get_seq_length() - guess_length
         keep_indices = torch.cat([
             torch.arange(0, input_length, device=verified_indices.device),
             verified_indices[1:] - 1 + input_length
         ])
-        for layer_idx, (k,v) in enumerate(zip(cache.key_cache, cache.value_cache)):
-            cache.key_cache[layer_idx] = k.index_select(-2, keep_indices)
-            cache.value_cache[layer_idx] = v.index_select(-2, keep_indices)
+        for layer in cache.layers:
+            if layer.keys is None or layer.values is None:
+                continue
+            idx = keep_indices.to(device=layer.keys.device)
+            layer.keys   = layer.keys.index_select(-2, idx)
+            layer.values = layer.values.index_select(-2, idx)
 
     @classmethod
     def get_relative_position_ids(cls, tree):
@@ -431,10 +466,24 @@ class TokenRecycling:
             layers = [[tree.data]]
             node_to_depth = {tree: 0}
             map_breadthfirst(tree, lambda node: update_layers(node, layers, node_to_depth))
+            # print(f"[DEBUG] Tree layers:") # Print the shape of each layer for debugging.
+            # for i, layer in enumerate(layers):
+            #     print(f"  Depth {i}: {layer}")
             return layers[:-1] # Drop the final empty layer.
 
         layer_indices = get_all_tree_layers(tree)[1:] \
             if cached_layer_indices is None else cached_layer_indices
+        
+        # try:
+        #     tmp = cls.get_static_tree_indices()
+        #     for depth in range(len(layer_indices)):
+        #         assert len(layer_indices[depth]) == len(tmp[depth]), f"Cached tree layer {depth} does not match static tree layer, got {len(layer_indices[depth])} nodes, expected {len(tmp[depth])} nodes"
+        #         for i in range(len(layer_indices[depth])):
+        #             assert torch.equal(layer_indices[depth][i], torch.tensor(tmp[depth][i], device=M.device)), f"Cached tree layer {i} does not match static tree layer, got {layer_indices[i]}, expected {tmp[i]}"
+        # except Exception as e:
+        #     print(f"[DEBUG] Cached tree layers do not match static tree layers, regenerating. Error: {e}")
+        
+        # print(f"[DEBUG] Merging sequence with tree layers of sizes {[len(layer) for layer in layer_indices]}") # Print the number of nodes at each layer for debugging.
         tree_depth = len(layer_indices)
         while d < tree_depth:  # 5: while d < Tree.depth do
             Lnext = []  # 6: Initialize next layer Lnext ← ∅
@@ -457,6 +506,18 @@ class TokenRecycling:
 
         S = torch.cat(S + [L])
         return S.to(device), layer_indices  # 15: return S
+    
+    @staticmethod
+    def get_static_tree_indices():
+        layers = [
+            [[0, 1, 2, 3, 4, 5, 6, 7]],
+            [[0, 1, 2, 3, 4, 5, 6, 7], [0, 1, 2, 3], [0, 1, 2], [0, 1], [0], [0], [0], [0]],
+            [[0, 1, 2, 3, 4, 5, 6, 7], [0, 1, 2], [0, 1], [0], [0], [0], [0], [0], [0, 1], [0], [], [], [0], [], [], [0], [], [0], [0], [], []],
+            [[0, 1, 2, 3, 4], [0, 1], [0], [0], [0], [], [], [], [0], [], [], [0], [], [], [], [], [], [], [0], [], [], [0], [0], [], []],
+            [[0, 1, 2], [0], [0], [], [], [0], [], [], [], [], [0], [], [0], [], []],
+            [[0, 1], [], [], [0], [], [], [], []]
+        ]
+        return layers
 
     @staticmethod
     def static_tree():
@@ -479,7 +540,92 @@ class TokenRecycling:
                 parent.children = [Tree(data=c) for c in children]
                 new_curr.extend(parent.children)
             curr = new_curr
+        node_list = map_breadthfirst(root, lambda x: x)
+        print(f"[DEBUG] Static tree initialized with {len(node_list)} nodes and depth {len(layers)}")
         return root
+
+    def _log_step(self, step, input_ids, guess_length):
+        """Log the current step with input IDs decoded as text, showing guesses as a tree."""
+        # if guess_length == 0:
+        #     return
+
+        input_length = input_ids.shape[-1] - guess_length
+        confirmed_ids = input_ids[0, :input_length]
+        guess_ids = input_ids[0, input_length:]
+
+        confirmed_text = self.tokenizer.decode(confirmed_ids, skip_special_tokens=True)
+        # Show only the tail of confirmed text for readability
+        tail = confirmed_text[-60:] if len(confirmed_text) > 60 else confirmed_text
+        if len(confirmed_text) > 60:
+            tail = "..." + tail
+
+        print(f"\n{'='*60}")
+        print(f"Step {step} | Confirmed tokens: {input_length} | Guess tokens: {guess_length}")
+        print(f"Context: {tail}")
+        print(f"Guess tree:")
+
+        # Rebuild the tree structure with actual token text
+        # The guess_ids correspond to breadth-first traversal of the tree (excluding root)
+        # Root of tree = last confirmed token (at input_length - 1), already in confirmed part
+        # guess_ids = tree nodes after root, in breadth-first order
+
+        nodes_bfs = map_breadthfirst(self.tree_template, lambda x: x)
+        # nodes_bfs[0] is root (last confirmed token), nodes_bfs[1:] are guess nodes
+        # guess_ids should align with nodes_bfs[1:]
+
+        node_to_index = {}
+        node_to_parent = {}
+        node_to_depth = {}
+        for i, node in enumerate(nodes_bfs):
+            node_to_index[node] = i
+            node_to_depth[node] = 0
+            for child in node.children:
+                node_to_parent[child] = node
+
+        # Compute depths
+        for node in nodes_bfs:
+            if node in node_to_parent:
+                node_to_depth[node] = node_to_depth[node_to_parent[node]] + 1
+
+        # Build display: root is the last confirmed token
+        root_token_id = input_ids[0, input_length - 1].item()
+        root_text = self.tokenizer.decode([root_token_id]).replace('\n', '\\n')
+
+        # For each guess node (nodes_bfs[1:]), map to guess_ids
+        if guess_length != len(nodes_bfs) - 1:
+            print(f"  [tree size mismatch: {guess_length} guesses vs {len(nodes_bfs)-1} tree nodes]")
+            return
+
+        print(f"  {repr(root_text)} (confirmed)")
+
+        # DFS print the tree with indentation and branch characters
+        def print_tree(node, prefix="", is_last=True, is_root=True):
+            idx = node_to_index[node]
+            depth = node_to_depth[node]
+
+            if is_root:
+                # Root already printed
+                pass
+            else:
+                guess_idx = idx - 1  # offset by 1 since root is excluded
+                if guess_idx < guess_length:
+                    token_id = guess_ids[guess_idx].item()
+                    token_text = self.tokenizer.decode([token_id]).replace('\n', '\\n').replace('\t', '\\t')
+                    connector = "└── " if is_last else "├── "
+                    print(f"  {prefix}{connector}{repr(token_text)} [id={token_id}]")
+                else:
+                    return
+
+            if not node.children:
+                return
+
+            child_prefix = prefix + ("    " if is_last or is_root else "│   ")
+            for i, child in enumerate(node.children):
+                print_tree(child, prefix=child_prefix, is_last=(i == len(node.children) - 1), is_root=False)
+
+        print_tree(nodes_bfs[0])
+        print(f"{'='*60}")
+
 
 class Tree:
     def __init__(self, data, children = []):

@@ -1,0 +1,44 @@
+python -m src.cli --model /cloud/oss_checkpoints/Qwen3/Qwen3-8B --prompt "How many taxi drivers in Bejing?"
+Loading checkpoint shards: 100%|█████████████████████████████████████████████████████████████████| 5/5 [00:03<00:00,  1.32it/s]
+[DEBUG] Static tree initialized with 81 nodes and depth 6
+
+Model: /cloud/oss_checkpoints/Qwen3/Qwen3-8B
+How many taxi drivers in Bejing?
+[DEBUG] Tokenized prompt: <|im_start|>user
+How many taxi drivers in Bejing?<|im_end|>
+<|im_start|>assistant
+
+End of prompt
+<think>
+Okay, the user is asking about the number of taxi drivers in Beijing. First, I need to recall if there's any official data on this. I know that Beijing has a large population and a significant number of taxis, but exact figures might not be readily available. 
+
+I remember that in China, the transportation department might have some statistics, but they might not be publicly accessible. Also, taxi drivers are often part of a larger transportation network, including ride-hailing services like Didi. So, the total number might include both traditional taxis and ride-hailing drivers.
+
+I should check if there are any recent reports or studies. Maybe the Beijing Municipal Transport Commission has some data. Also, considering the city's size and the number of taxis, the figure could be in the tens of thousands. For example, if each taxi driver operates one vehicle, and there are around 50,000 taxis, that would be a rough estimate. But I need to be careful not to assume without data.
+
+Another angle is the number of taxi licenses. In some cities, the number of licenses is regulated, and each license corresponds to a driver. However, in Beijing, the licensing system might be different. There could be a cap on the number of taxis, which would influence the number of drivers. 
+
+I should also consider that some drivers might work part-time or have multiple jobs, so the number of drivers could be higher than the number of taxis. Additionally, the rise of ride-hailing services might have affected the traditional taxi industry, leading to a shift in the number of drivers. 
+
+Wait, the user might be interested in the current situation, so I need to mention that the exact number isn't publicly available and that it's subject to change. Also, it's important to note that the number includes both traditional taxi drivers and those using ride-hailing platforms. 
+
+I should also mention that the Beijing government has been working on improving public transportation and regulating the taxi industry, which might affect the number of drivers. Maybe there are policies that limit the number of taxis or encourage the use of ride-hailing services. 
+
+In summary, the answer should state that there's no exact figure, provide an estimated range based on available data, and explain the factors that influence the number, such as licensing, ride-hailing services, and government regulations. It's also important to advise the user to check the latest official sources for the most accurate information.
+</think>
+
+The exact number of taxi drivers in Beijing is not publicly disclosed in official statistics, but estimates suggest there are **around 50,000 to 60,000 taxi drivers** operating in the city. This figure includes both traditional taxi drivers and those working with ride-hailing platforms like Didi Chuxing. 
+
+### Key Considerations:
+1. **Regulation and Licensing**: Beijing has strict regulations on taxi operations, including licensing requirements and caps on the number of taxis. These policies influence the total number of drivers.
+2. **Ride-Hailing Services**: The rise of ride-hailing platforms has blurred the line between traditional taxis and ride-hailing drivers, making it harder to categorize all drivers.
+3. **Population and Demand**: As one of China's largest cities, Beijing's high population and transportation demand contribute to a large taxi workforce.
+4. **Dynamic Changes**: Numbers may fluctuate due to policy adjustments, technological shifts (e.g., ride-hailing growth), and economic factors.
+
+For the most accurate and up-to-date information, it is recommended to consult official sources such as the **Beijing Municipal Transport Commission** or recent government reports.
+
+**Note
+
+Mean Accepted Tokens: 2.47
+Prompt: 54.88 tokens/sec
+Generation: 44.07 tokens/sec
